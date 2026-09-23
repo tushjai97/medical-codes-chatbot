@@ -8,6 +8,7 @@ Measures:
 - Response Time: Average latency by mode
 """
 
+import argparse
 import json
 import requests
 import time
@@ -45,6 +46,15 @@ def query_api(clinical_description: str, mode: str = "quick", max_results: int =
         return {"error": str(e)}
 
 
+def _normalize_code(code: str) -> str:
+    """Strip formatting (dots) so 'E11.9' and 'E119' compare equal.
+
+    ICD-10 source data is stored undotted (raw NCHS format), but test
+    cases/clinicians often write codes in dotted clinical notation.
+    """
+    return code.replace(".", "").upper()
+
+
 def calculate_precision_at_k(predicted: List[str], expected: List[str], k: int) -> float:
     """
     Precision@K: What percentage of top K predictions are correct?
@@ -54,8 +64,9 @@ def calculate_precision_at_k(predicted: List[str], expected: List[str], k: int) 
     expected = ["E11.9", "I10"]
     Precision@3 = 2/3 = 0.667 (2 correct out of 3 returned)
     """
-    predicted_k = predicted[:k]
-    correct = sum(1 for code in predicted_k if any(exp in code or code in exp for exp in expected))
+    predicted_k = [_normalize_code(c) for c in predicted[:k]]
+    expected_n = [_normalize_code(e) for e in expected]
+    correct = sum(1 for code in predicted_k if any(exp in code or code in exp for exp in expected_n))
     return correct / k if k > 0 else 0
 
 
@@ -68,8 +79,9 @@ def calculate_recall_at_k(predicted: List[str], expected: List[str], k: int) -> 
     expected = ["E11.9", "I10", "R05", "R06.02"]
     Recall@3 = 2/4 = 0.5 (found 2 out of 4 expected codes)
     """
-    predicted_k = predicted[:k]
-    found = sum(1 for exp in expected if any(exp in code or code in exp for code in predicted_k))
+    predicted_k = [_normalize_code(c) for c in predicted[:k]]
+    expected_n = [_normalize_code(e) for e in expected]
+    found = sum(1 for exp in expected_n if any(exp in code or code in exp for code in predicted_k))
     return found / len(expected) if expected else 0
 
 
@@ -82,8 +94,10 @@ def calculate_mrr(predicted: List[str], expected: List[str]) -> float:
     expected = ["E11.9"]
     MRR = 1/3 = 0.333 (first correct at position 3)
     """
+    expected_n = [_normalize_code(e) for e in expected]
     for i, code in enumerate(predicted, 1):
-        if any(exp in code or code in exp for exp in expected):
+        code_n = _normalize_code(code)
+        if any(exp in code_n or code_n in exp for exp in expected_n):
             return 1 / i
     return 0
 
@@ -218,6 +232,10 @@ def print_results(results: List[Dict], mode: str):
 
 def main():
     """Run evaluation"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file", default="test_cases.json", help="Path to a test cases JSON file")
+    args = parser.parse_args()
+
     print("Medical Coding RAG System - Evaluation")
     print("=" * 80)
 
@@ -234,8 +252,8 @@ def main():
         return
 
     # Load test cases
-    test_cases = load_test_cases()
-    print(f"Loaded {len(test_cases)} test cases\n")
+    test_cases = load_test_cases(args.file)
+    print(f"Loaded {len(test_cases)} test cases from {args.file}\n")
 
     # Evaluate in quick mode
     print("Running evaluation in QUICK mode...")

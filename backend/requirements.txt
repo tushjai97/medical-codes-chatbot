@@ -26,6 +26,9 @@ huggingface-hub==0.25.0
 transformers==4.44.0
 sentence-transformers==3.0.1
 
+# Voyage AI embeddings
+voyageai>=0.3.0
+
 # LLM
 openai>=1.3.0
 

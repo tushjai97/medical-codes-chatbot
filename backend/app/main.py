@@ -44,9 +44,13 @@ async def lifespan(app: FastAPI):
     await db.connect()
     logger.info("Database connected")
 
-    # Load embedding model (pre-loads to avoid first-request delay)
-    embedding_service = get_embedding_service(settings.EMBEDDING_MODEL_NAME)
-    logger.info(f"Embedding model loaded: {settings.EMBEDDING_MODEL_NAME}")
+    # Initialize embedding client (pre-initializes to avoid first-request delay)
+    embedding_service = get_embedding_service(
+        api_key=settings.VOYAGE_API_KEY,
+        model_name=settings.VOYAGE_MODEL_NAME,
+        dimension=settings.EMBEDDING_DIM,
+    )
+    logger.info(f"Embedding model loaded: {settings.VOYAGE_MODEL_NAME}")
 
     logger.info("API ready!")
 
@@ -122,7 +126,7 @@ async def health_check():
     return HealthResponse(
         status="healthy" if db_status == "connected" else "unhealthy",
         database=db_status,
-        embedding_model=settings.EMBEDDING_MODEL_NAME
+        embedding_model=settings.VOYAGE_MODEL_NAME
     )
 
 

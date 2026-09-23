@@ -14,11 +14,13 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.services.embeddings import get_embedding_service
+from app.config import settings
+from setup_database import rebuild_icd10_vector_index
 
 load_dotenv()
 
 ICD10_FILE = Path(__file__).parent.parent.parent / "data" / "icd10cm-codes-2025.txt"
-BATCH_SIZE = 100
+BATCH_SIZE = 500  # Voyage allows up to 1000 texts / 1M tokens per request
 
 
 def parse_icd10_line(line: str) -> dict:
@@ -60,8 +62,13 @@ def parse_icd10_line(line: str) -> dict:
     }
 
 
-async def load_icd10_codes():
-    """Load ICD-10 codes with embeddings"""
+async def load_icd10_codes(limit: int = None):
+    """Load ICD-10 codes with embeddings
+
+    Args:
+        limit: If set, only load/embed the first N codes (useful for a
+            quick validation run before committing to the full ~74k set)
+    """
 
     # Parse file
     print(f"Reading ICD-10 codes from {ICD10_FILE}...")
@@ -74,19 +81,30 @@ async def load_icd10_codes():
                 if parsed:
                     icd10_data.append(parsed)
 
+    if limit:
+        icd10_data = icd10_data[:limit]
+
     print(f"Loaded {len(icd10_data)} ICD-10 codes")
 
     # Generate embeddings
-    print("\nGenerating embeddings (this will take a few minutes)...")
-    embedding_service = get_embedding_service()
+    print(f"\nGenerating embeddings via {settings.VOYAGE_MODEL_NAME} (this will take a few minutes)...")
+    embedding_service = get_embedding_service(
+        api_key=settings.VOYAGE_API_KEY,
+        model_name=settings.VOYAGE_MODEL_NAME,
+        dimension=settings.EMBEDDING_DIM,
+    )
 
     descriptions = [item['description'] for item in icd10_data]
 
-    # Process in batches
+    # Process in batches (one Voyage API call per batch)
     all_embeddings = []
     for i in tqdm(range(0, len(descriptions), BATCH_SIZE), desc="Embedding batches"):
         batch = descriptions[i:i + BATCH_SIZE]
-        batch_embeddings = embedding_service.generate_embeddings_batch(batch, batch_size=32)
+        try:
+            batch_embeddings = embedding_service.generate_embeddings_batch(batch, batch_size=BATCH_SIZE)
+        except Exception as e:
+            print(f"Failed to embed batch starting at index {i}: {e}")
+            raise
         all_embeddings.extend(batch_embeddings.tolist())
 
     # Add embeddings to data
@@ -125,6 +143,11 @@ async def load_icd10_codes():
             batch = records[i:i + 1000]
             await conn.executemany(insert_query, batch)
 
+        # Rebuild the vector index now that data exists (an ivfflat index
+        # built on an empty table has degenerate clusters)
+        print("\nRebuilding vector index...")
+        await rebuild_icd10_vector_index(conn)
+
         # Verify
         count = await conn.fetchval("SELECT COUNT(*) FROM icd10_codes")
         print(f"\nSuccessfully loaded {count} ICD-10 codes")
@@ -147,4 +170,8 @@ async def load_icd10_codes():
 
 
 if __name__ == "__main__":
-    asyncio.run(load_icd10_codes())
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=None, help="Only load the first N codes (for a quick validation run)")
+    args = parser.parse_args()
+    asyncio.run(load_icd10_codes(limit=args.limit))

@@ -157,8 +157,9 @@ async def search_all(
         Tuple of (cpt_results, icd10_results)
     """
     # Generate embedding once for both searches
+    # Voyage's client is synchronous/network-bound, so run it off the event loop
     embedding_service = get_embedding_service()
-    query_embedding = embedding_service.generate_embedding(query)
+    query_embedding = await asyncio.to_thread(embedding_service.generate_embedding, query)
 
     # Search both code types in parallel
     cpt_results, icd10_results = await asyncio.gather(

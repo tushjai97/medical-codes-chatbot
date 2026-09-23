@@ -1,107 +1,130 @@
 """
 Embedding Generation Service
-Uses sentence-transformers for local, cost-free embedding generation
+Uses Voyage AI's hosted embedding API
 """
 
-from sentence_transformers import SentenceTransformer
+import time
+import voyageai
 import numpy as np
-from typing import List, Union
+from typing import List
 import logging
 
 logger = logging.getLogger(__name__)
 
+# Voyage API limits for voyage-4-lite
+MAX_BATCH_SIZE = 1000
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2
+
 
 class EmbeddingService:
     """
-    Manages embedding generation using sentence-transformers
+    Manages embedding generation using the Voyage AI API
 
-    Uses all-MiniLM-L6-v2 model for fast, accurate embeddings:
-    - 384 dimensions
-    - ~15ms per embedding on CPU
-    - Normalized vectors for cosine similarity
+    Uses voyage-4-lite for fast, high quality hosted embeddings:
+    - 1024 dimensions (default)
+    - Network call per request (not local/free like sentence-transformers)
+    - input_type distinguishes queries from documents, which matters
+      for retrieval quality with Voyage's models
     """
 
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, api_key: str, model_name: str = "voyage-4-lite", dimension: int = 1024):
         """
-        Initialize embedding model
+        Initialize the Voyage embedding client
 
         Args:
-            model_name: HuggingFace model identifier
+            api_key: Voyage AI API key
+            model_name: Voyage model identifier
+            dimension: Expected output embedding dimension
         """
-        logger.info(f"Loading embedding model: {model_name}")
-        self.model = SentenceTransformer(model_name)
-        self.dimension = self.model.get_sentence_embedding_dimension()
-        logger.info(f"Model loaded. Embedding dimension: {self.dimension}")
+        logger.info(f"Initializing Voyage embedding client with model: {model_name}")
+        self.client = voyageai.Client(api_key=api_key)
+        self.model_name = model_name
+        self.dimension = dimension
+
+    def _embed_with_retry(self, texts: List[str], input_type: str) -> List[List[float]]:
+        """Call Voyage's embed API with basic retry/backoff on transient errors"""
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                result = self.client.embed(
+                    texts,
+                    model=self.model_name,
+                    input_type=input_type,
+                )
+                return result.embeddings
+            except Exception as e:
+                last_error = e
+                wait = RETRY_BACKOFF_SECONDS * (2 ** attempt)
+                logger.warning(
+                    f"Voyage embed call failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}. "
+                    f"Retrying in {wait}s..."
+                )
+                time.sleep(wait)
+        raise last_error
 
     def generate_embedding(self, text: str) -> np.ndarray:
         """
-        Generate embedding for a single text
+        Generate embedding for a single search query
 
         Args:
-            text: Input text to embed
+            text: Input query text to embed
 
         Returns:
-            Normalized embedding vector (numpy array)
+            Embedding vector (numpy array)
         """
-        embedding = self.model.encode(
-            text,
-            normalize_embeddings=True,  # Critical for cosine similarity
-            show_progress_bar=False
-        )
-        return embedding
+        embeddings = self._embed_with_retry([text], input_type="query")
+        return np.array(embeddings[0])
 
     def generate_embeddings_batch(
         self,
         texts: List[str],
-        batch_size: int = 32
+        batch_size: int = MAX_BATCH_SIZE,
     ) -> np.ndarray:
         """
-        Generate embeddings for multiple texts efficiently
-
-        Batching provides significant speedup:
-        - Single: ~15ms each
-        - Batch of 100: ~500ms total (5x faster)
+        Generate embeddings for multiple document texts (e.g. code descriptions)
 
         Args:
             texts: List of input texts
-            batch_size: Batch size for processing (32 is optimal for CPU)
+            batch_size: Number of texts per Voyage API request (max 1000)
 
         Returns:
-            Array of normalized embeddings, shape (len(texts), dimension)
+            Array of embeddings, shape (len(texts), dimension)
         """
-        embeddings = self.model.encode(
-            texts,
-            batch_size=batch_size,
-            normalize_embeddings=True,
-            show_progress_bar=True,
-            convert_to_numpy=True
-        )
-        return embeddings
+        batch_size = min(batch_size, MAX_BATCH_SIZE)
+        all_embeddings: List[List[float]] = []
+        for i in range(0, len(texts), batch_size):
+            chunk = texts[i:i + batch_size]
+            chunk_embeddings = self._embed_with_retry(chunk, input_type="document")
+            all_embeddings.extend(chunk_embeddings)
+            logger.info(f"Embedded {min(i + batch_size, len(texts))}/{len(texts)} texts")
+        return np.array(all_embeddings)
 
 
 # Global instance (singleton pattern)
-# Load model once at startup, reuse for all requests
+# Reuse the same Voyage client for all requests
 _embedding_service = None
 
 
 def get_embedding_service(
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    api_key: str = None,
+    model_name: str = "voyage-4-lite",
+    dimension: int = 1024,
 ) -> EmbeddingService:
     """
     Get or create embedding service singleton
 
-    Using singleton ensures:
-    - Model loaded only once (saves ~2s per request)
-    - Consistent embeddings across requests
-    - Memory efficient (one model in RAM)
-
     Args:
+        api_key: Voyage AI API key (required on first call)
         model_name: Model to use (defaults to config)
+        dimension: Expected embedding dimension
 
     Returns:
         EmbeddingService instance
     """
     global _embedding_service
     if _embedding_service is None:
-        _embedding_service = EmbeddingService(model_name)
+        if api_key is None:
+            raise ValueError("api_key is required to initialize the embedding service")
+        _embedding_service = EmbeddingService(api_key, model_name, dimension)
     return _embedding_service

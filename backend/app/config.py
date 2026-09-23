@@ -19,8 +19,9 @@ class Settings(BaseSettings):
     PERPLEXITY_MODEL: str = "llama-3.1-sonar-small-128k-online"
 
     # Embedding Model
-    EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
-    EMBEDDING_DIM: int = 384
+    VOYAGE_API_KEY: str
+    VOYAGE_MODEL_NAME: str = "voyage-4-lite"
+    EMBEDDING_DIM: int = 1024
 
     # Application
     LOG_LEVEL: str = "INFO"
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
 
 # Global settings instance

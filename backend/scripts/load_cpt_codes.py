@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.services.embeddings import get_embedding_service
+from app.config import settings
+from setup_database import rebuild_cpt_vector_index
 
 load_dotenv()
 
@@ -42,11 +44,19 @@ async def load_cpt_codes():
     print(f"Loaded {len(cpt_data)} CPT codes")
 
     # Generate embeddings
-    print("\nGenerating embeddings...")
-    embedding_service = get_embedding_service()
+    print(f"\nGenerating embeddings via {settings.VOYAGE_MODEL_NAME}...")
+    embedding_service = get_embedding_service(
+        api_key=settings.VOYAGE_API_KEY,
+        model_name=settings.VOYAGE_MODEL_NAME,
+        dimension=settings.EMBEDDING_DIM,
+    )
 
     descriptions = [item['description'] for item in cpt_data]
-    embeddings = embedding_service.generate_embeddings_batch(descriptions, batch_size=BATCH_SIZE)
+    try:
+        embeddings = embedding_service.generate_embeddings_batch(descriptions, batch_size=BATCH_SIZE)
+    except Exception as e:
+        print(f"Failed to generate embeddings: {e}")
+        raise
 
     # Add embeddings to data
     for i, item in enumerate(cpt_data):
@@ -78,6 +88,11 @@ async def load_cpt_codes():
                 item['status'],
                 embedding_str
             )
+
+        # Rebuild the vector index now that data exists (an ivfflat index
+        # built on an empty table has degenerate clusters)
+        print("\nRebuilding vector index...")
+        await rebuild_cpt_vector_index(conn)
 
         # Verify
         count = await conn.fetchval("SELECT COUNT(*) FROM cpt_codes")
