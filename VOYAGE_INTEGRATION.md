@@ -1,9 +1,11 @@
-# Voyage-4-lite Embedding Integration
+# Voyage-4-lite Embedding + Local Reranker Integration
 
 This branch (`voyage-4-lite-embeddings`) swaps the pipeline's embedding
 model from local `sentence-transformers/all-MiniLM-L6-v2` (384-dim) to
-Voyage AI's hosted `voyage-4-lite` (1024-dim), and adds tooling to spot-check
-and measure retrieval performance.
+Voyage AI's hosted `voyage-4-lite` (1024-dim), replaces the Perplexity
+LLM reranker (Expert mode) with a local open-source cross-encoder
+(`BAAI/bge-reranker-v2-m3`), and adds tooling to spot-check and measure
+retrieval performance.
 
 ## Pipeline structure
 
@@ -20,7 +22,7 @@ medical-codes-chatbot/
 │   │       ├── keyword_search.py  # Postgres full-text search
 │   │       ├── hybrid_search.py   # Combines vector + keyword via RRF (search_all())
 │   │       ├── ranking.py         # Reciprocal Rank Fusion + score normalization
-│   │       └── llm_service.py     # Perplexity LLM reranking (Expert mode only)
+│   │       └── reranker_service.py # BAAI/bge-reranker-v2-m3 cross-encoder (Expert mode only)
 │   └── scripts/
 │       ├── setup_database.py      # Creates cpt_codes/icd10_codes tables + indexes
 │       ├── load_cpt_codes.py      # Embeds + loads ~1,163 CPT codes
@@ -52,6 +54,10 @@ search (Postgres full-text) → Reciprocal Rank Fusion → top-K CPT/ICD-10 code
 | `backend/scripts/load_cpt_codes.py` / `load_icd10_codes.py` | pass Voyage credentials explicitly; rebuild vector index after loading |
 | `evaluation/evaluate.py` | `--file` flag; normalizes dotted vs. undotted ICD-10 codes before scoring |
 | `evaluation/query_cli.py` | new interactive CLI |
+| `backend/app/services/llm_service.py` | removed (was Perplexity-based reranker) |
+| `backend/app/services/reranker_service.py` | new: `BAAI/bge-reranker-v2-m3` cross-encoder reranker for Expert mode |
+| `backend/app/config.py` | removed `PERPLEXITY_API_KEY`/`PERPLEXITY_MODEL`; added `RERANKER_MODEL_NAME` |
+| `backend/requirements.txt` | removed `openai`; kept `sentence-transformers` (now used for the reranker, not embeddings) |
 
 ### Two bugs fixed along the way
 1. **ivfflat index built on an empty table** produces degenerate clusters and
@@ -63,6 +69,27 @@ search (Postgres full-text) → Reciprocal Rank Fusion → top-K CPT/ICD-10 code
    (`E119`), but `test_cases.json` uses clinical dotted notation (`E11.9`).
    `evaluate.py` now normalizes both before comparing.
 
+## Reranker: Perplexity LLM → local BAAI/bge-reranker-v2-m3
+
+Expert mode previously sent the top hybrid-search candidates to Perplexity
+(Llama 3.1 Sonar) to rerank and explain them. That's replaced with a local
+open-source cross-encoder ([BAAI/bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3),
+MIT licensed, ~568M params) via `sentence-transformers.CrossEncoder`:
+
+- No API key, no network call, no per-query cost.
+- Scores `(query, code description)` pairs directly (cross-encoder), then
+  sigmoid-normalizes to 0-1 for `confidence_score`.
+- No natural-language reasoning text — a cross-encoder only outputs a
+  relevance score, not text — so `reasoning` is always `null` and
+  `explanation` just names the reranker used.
+- **Forces `device="cpu"`**: concurrent `predict()` calls on Apple's MPS
+  (GPU) backend from multiple threads crashed the process during testing;
+  CPU scoring runs sequentially in a single background thread instead.
+- Only reorders the same candidate pool hybrid search already returned
+  (top 10 per code type) — it can't add codes hybrid search missed, so
+  Precision@5/Recall@5 are bounded by Quick mode's results. Its effect is
+  on ranking quality within that pool (see MRR in results below).
+
 ## Steps to reproduce / run
 
 ### 1. Prerequisites
@@ -73,7 +100,8 @@ search (Postgres full-text) → Reciprocal Rank Fusion → top-K CPT/ICD-10 code
 ```bash
 cd backend
 cp .env.example .env
-# Edit .env: set NEON_DATABASE_URL, VOYAGE_API_KEY, PERPLEXITY_API_KEY (dummy value ok if not using Expert mode)
+# Edit .env: set NEON_DATABASE_URL, VOYAGE_API_KEY
+# RERANKER_MODEL_NAME defaults to BAAI/bge-reranker-v2-m3, no API key needed
 ```
 
 ### 3. Install dependencies
@@ -106,7 +134,17 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 cd ../evaluation
 python3 query_cli.py
 # type keywords, e.g. "chest x-ray for pneumonia", "appendectomy"
+python3 query_cli.py --mode expert   # exercises the local cross-encoder reranker
 ```
+
+Or test Expert mode directly:
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/code-suggestions \
+  -H "Content-Type: application/json" \
+  -d '{"clinical_description": "appendectomy", "search_mode": "expert", "max_results": 5}'
+```
+The first Expert-mode call downloads and loads `BAAI/bge-reranker-v2-m3`
+(~2GB, one-time), so it's slower; subsequent calls reuse the loaded model.
 
 ### 8. Run the full evaluation
 ```bash
@@ -127,6 +165,26 @@ CPT precision/recall is lower because several test cases expect generic
 E&M visit codes (99213/99214) for diagnosis-only queries — those codes
 can't be inferred from CPT description text alone via embeddings.
 Procedure-style queries (e.g. "appendectomy") score well in spot checks.
+
+### Quick vs. Expert mode (reranker effect)
+
+| Metric | ICD-10 Quick | ICD-10 Expert | CPT Quick | CPT Expert |
+|---|---|---|---|---|
+| Precision@5 | 20.0% | 20.0% | 10.0% | 10.0% |
+| Recall@5 | 48.3% | 48.3% | 30.0% | 30.0% |
+| MRR | 0.475 | **0.550** | 0.250 | 0.233 |
+| Avg latency | ~230ms | ~423ms | — | — |
+
+As expected, Precision@5/Recall@5 are identical — the reranker only
+reorders the same candidate pool Quick mode already retrieves, it can't
+add codes that weren't found. ICD-10 MRR improved (0.475 → 0.550): the
+cross-encoder pushes more correct answers closer to rank 1. CPT MRR was
+roughly flat (0.250 → 0.233) on this small 10-case set. Latency roughly
+doubles due to the cross-encoder inference pass.
+
+```bash
+python3 evaluate.py   # answer 'y' to "Run evaluation in EXPERT mode?" to reproduce this
+```
 
 ### Procedure-only breakdown
 
