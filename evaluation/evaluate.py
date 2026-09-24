@@ -145,7 +145,7 @@ def evaluate_test_case(test_case: Dict, mode: str = "quick", k: int = 5) -> Dict
     }
 
 
-def print_results(results: List[Dict], mode: str):
+def print_results(results: List[Dict], mode: str, verbose: bool = False):
     """Print evaluation results"""
     print(f"\n{'='*80}")
     print(f"EVALUATION RESULTS - {mode.upper()} MODE")
@@ -210,10 +210,12 @@ def print_results(results: List[Dict], mode: str):
             print(f"  ICD Precision: {statistics.mean(data['icd10_p']):.1%}")
 
     # Print some examples
+    shown = results if verbose else results[:3]
     print(f"\n{'='*80}")
-    print("SAMPLE RESULTS (First 3 test cases)\n")
+    label = "ALL TEST CASES" if verbose else "SAMPLE RESULTS (First 3 test cases)"
+    print(f"{label}\n")
 
-    for i, result in enumerate(results[:3], 1):
+    for i, result in enumerate(shown, 1):
         if "error" in result:
             print(f"{i}. ERROR: {result['error']}\n")
             continue
@@ -234,6 +236,7 @@ def main():
     """Run evaluation"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", default="test_cases.json", help="Path to a test cases JSON file")
+    parser.add_argument("--verbose", action="store_true", help="Print per-query results for all test cases, not just the first 3")
     args = parser.parse_args()
 
     print("Medical Coding RAG System - Evaluation")
@@ -263,12 +266,12 @@ def main():
         result = evaluate_test_case(test_case, mode="quick", k=5)
         results_quick.append(result)
 
-    print_results(results_quick, "quick")
+    print_results(results_quick, "quick", verbose=args.verbose)
 
     # Optionally evaluate expert mode
     print(f"\n{'='*80}")
     response = input("\nRun evaluation in EXPERT mode? (y/n): ")
-    if response.lower() == 'y':
+    if response.strip().lower() == 'y':
         print("\nRunning evaluation in EXPERT mode (will take longer)...")
         results_expert = []
         for i, test_case in enumerate(test_cases, 1):
@@ -276,7 +279,7 @@ def main():
             result = evaluate_test_case(test_case, mode="expert", k=5)
             results_expert.append(result)
 
-        print_results(results_expert, "expert")
+        print_results(results_expert, "expert", verbose=args.verbose)
 
     print(f"\n{'='*80}")
     print("Evaluation complete!")
