@@ -49,6 +49,7 @@ desktop.ini
 
 # Logs
 *.log
+backend/logs/
 
 # Database
 *.db

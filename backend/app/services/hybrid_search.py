@@ -9,6 +9,7 @@ This is the core innovation of our system:
 """
 
 import asyncio
+import time
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 import logging
@@ -20,6 +21,26 @@ from .embeddings import get_embedding_service
 from ..utils.pipeline_logger import log_stage, timed_stage
 
 logger = logging.getLogger(__name__)
+
+
+async def _timed(coro, stage: str, key_field: str, **extra_fields):
+    """Await coro, logging its own actual duration (not the duration of
+    whatever else is running concurrently alongside it via asyncio.gather)"""
+    start = time.perf_counter()
+    try:
+        result = await coro
+    except Exception as e:
+        log_stage(stage, duration_ms=round((time.perf_counter() - start) * 1000, 1), error=str(e), **extra_fields)
+        raise
+    duration_ms = (time.perf_counter() - start) * 1000
+    log_stage(
+        stage,
+        duration_ms=round(duration_ms, 1),
+        count=len(result),
+        top=[r[key_field] for r in result[:5]],
+        **extra_fields,
+    )
+    return result
 
 
 async def hybrid_search_cpt(
@@ -47,30 +68,20 @@ async def hybrid_search_cpt(
         Combined ranked results with confidence scores
     """
     # Run both searches in parallel for speed
-    with timed_stage("vector_search", code_type="cpt") as vt, \
-         timed_stage("keyword_search", code_type="cpt") as kt:
-        vector_results, keyword_results = await asyncio.gather(
-            search_cpt_codes_vector(query_embedding, limit=20, category=category),
-            search_cpt_codes_keyword(query, limit=20, category=category),
-            return_exceptions=True  # Don't fail if one search errors
-        )
+    vector_results, keyword_results = await asyncio.gather(
+        _timed(search_cpt_codes_vector(query_embedding, limit=20, category=category), "vector_search", "cpt_code", code_type="cpt"),
+        _timed(search_cpt_codes_keyword(query, limit=20, category=category), "keyword_search", "cpt_code", code_type="cpt"),
+        return_exceptions=True  # Don't fail if one search errors
+    )
 
     # Handle errors gracefully
     if isinstance(vector_results, Exception):
         logger.error(f"Vector search failed: {vector_results}")
-        vt["error"] = str(vector_results)
         vector_results = []
-    else:
-        vt["count"] = len(vector_results)
-        vt["top"] = [r['cpt_code'] for r in vector_results[:5]]
 
     if isinstance(keyword_results, Exception):
         logger.error(f"Keyword search failed: {keyword_results}")
-        kt["error"] = str(keyword_results)
         keyword_results = []
-    else:
-        kt["count"] = len(keyword_results)
-        kt["top"] = [r['cpt_code'] for r in keyword_results[:5]]
 
     # Combine using RRF
     combined = reciprocal_rank_fusion(
@@ -118,8 +129,8 @@ async def hybrid_search_icd10(
     """
     # Run both searches in parallel
     vector_results, keyword_results = await asyncio.gather(
-        search_icd10_codes_vector(query_embedding, limit=20, chapter=chapter),
-        search_icd10_codes_keyword(query, limit=20, chapter=chapter),
+        _timed(search_icd10_codes_vector(query_embedding, limit=20, chapter=chapter), "vector_search", "icd10_code", code_type="icd10"),
+        _timed(search_icd10_codes_keyword(query, limit=20, chapter=chapter), "keyword_search", "icd10_code", code_type="icd10"),
         return_exceptions=True
     )
 
@@ -140,6 +151,13 @@ async def hybrid_search_icd10(
 
     # Normalize scores
     combined = normalize_scores(combined, score_field='rrf_score')
+
+    log_stage(
+        "rrf_fusion",
+        code_type="icd10",
+        combined_count=len(combined),
+        top=[r['icd10_code'] for r in combined[:limit]],
+    )
 
     # Return top results
     return combined[:limit]
@@ -177,7 +195,9 @@ async def search_all(
     # Generate embedding once for both searches
     # Voyage's client is synchronous/network-bound, so run it off the event loop
     embedding_service = get_embedding_service()
-    query_embedding = await asyncio.to_thread(embedding_service.generate_embedding, query)
+    with timed_stage("embedding", model=embedding_service.model_name) as et:
+        query_embedding = await asyncio.to_thread(embedding_service.generate_embedding, query)
+        et["dimension"] = len(query_embedding)
 
     # Search both code types in parallel
     cpt_results, icd10_results = await asyncio.gather(

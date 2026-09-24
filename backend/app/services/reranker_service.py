@@ -16,6 +16,8 @@ import logging
 
 from sentence_transformers import CrossEncoder
 
+from ..utils.pipeline_logger import timed_stage
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
@@ -82,14 +84,18 @@ class RerankerService:
                 self._score(query, [c['description'] for c in icd10_candidates]),
             )
 
-        cpt_scores, icd10_scores = await asyncio.to_thread(_score_both)
+        with timed_stage("rerank", model=self.model_name) as rt:
+            cpt_scores, icd10_scores = await asyncio.to_thread(_score_both)
 
-        cpt_ranked = sorted(
-            zip(cpt_candidates, cpt_scores), key=lambda x: x[1], reverse=True
-        )[:TOP_K]
-        icd10_ranked = sorted(
-            zip(icd10_candidates, icd10_scores), key=lambda x: x[1], reverse=True
-        )[:TOP_K]
+            cpt_ranked = sorted(
+                zip(cpt_candidates, cpt_scores), key=lambda x: x[1], reverse=True
+            )[:TOP_K]
+            icd10_ranked = sorted(
+                zip(icd10_candidates, icd10_scores), key=lambda x: x[1], reverse=True
+            )[:TOP_K]
+
+            rt["cpt_reranked"] = [(c['cpt_code'], round(s, 3)) for c, s in cpt_ranked]
+            rt["icd10_reranked"] = [(c['icd10_code'], round(s, 3)) for c, s in icd10_ranked]
 
         return {
             "cpt_codes": [
