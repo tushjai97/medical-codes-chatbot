@@ -16,7 +16,7 @@ from .models.response_models import (
     CodingResponse, CodeSuggestion, StatsResponse, HealthResponse
 )
 from .services.hybrid_search import search_all
-from .services.llm_service import get_llm_service
+from .services.reranker_service import get_reranker_service
 from .services.embeddings import get_embedding_service
 from .utils.logger import setup_logging
 
@@ -226,17 +226,17 @@ async def get_code_suggestions(query: CodingQuery):
 
         # Mode-based processing
         if query.search_mode == "expert":
-            # LLM reranking with explanations
-            logger.info(f"Using Expert mode with LLM for query: {query.clinical_description[:50]}...")
+            # Local cross-encoder reranking (no LLM/API call)
+            logger.info(f"Using Expert mode with reranker for query: {query.clinical_description[:50]}...")
 
-            llm_service = get_llm_service()
-            llm_results = await llm_service.rerank_codes(
+            reranker_service = get_reranker_service(settings.RERANKER_MODEL_NAME)
+            rerank_results = await reranker_service.rerank_codes(
                 query.clinical_description,
                 cpt_results,
                 icd10_results
             )
 
-            # Map LLM results back to full code details
+            # Map reranked results back to full code details
             cpt_map = {c['cpt_code']: c for c in cpt_results}
             icd10_map = {c['icd10_code']: c for c in icd10_results}
 
@@ -249,7 +249,7 @@ async def get_code_suggestions(query: CodingQuery):
                     confidence_score=item['confidence'],
                     reasoning=item.get('reasoning')
                 )
-                for item in llm_results['cpt_codes']
+                for item in rerank_results['cpt_codes']
                 if item['code'] in cpt_map
             ]
 
@@ -262,11 +262,11 @@ async def get_code_suggestions(query: CodingQuery):
                     confidence_score=item['confidence'],
                     reasoning=item.get('reasoning')
                 )
-                for item in llm_results['icd10_codes']
+                for item in rerank_results['icd10_codes']
                 if item['code'] in icd10_map
             ]
 
-            explanation = llm_results.get('explanation')
+            explanation = rerank_results.get('explanation')
 
         else:
             # Quick/Standard mode (no LLM)
