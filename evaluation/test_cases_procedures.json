@@ -1,0 +1,37 @@
+[
+  {
+    "id": 5,
+    "query": "Total knee arthroplasty replacement surgery",
+    "expected_icd10": [
+      "M17.9"
+    ],
+    "expected_cpt": [
+      "27447"
+    ],
+    "difficulty": "medium"
+  },
+  {
+    "id": 8,
+    "query": "Open repair of abdominal aortic aneurysm",
+    "expected_icd10": [
+      "I71.4"
+    ],
+    "expected_cpt": [
+      "34830",
+      "35081"
+    ],
+    "difficulty": "hard"
+  },
+  {
+    "id": 10,
+    "query": "Finger amputation due to trauma",
+    "expected_icd10": [
+      "S68.9"
+    ],
+    "expected_cpt": [
+      "26951",
+      "26952"
+    ],
+    "difficulty": "hard"
+  }
+]
