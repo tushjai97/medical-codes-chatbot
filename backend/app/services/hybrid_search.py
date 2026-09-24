@@ -17,6 +17,7 @@ from .vector_search import search_cpt_codes_vector, search_icd10_codes_vector
 from .keyword_search import search_cpt_codes_keyword, search_icd10_codes_keyword
 from .ranking import reciprocal_rank_fusion, normalize_scores
 from .embeddings import get_embedding_service
+from ..utils.pipeline_logger import log_stage, timed_stage
 
 logger = logging.getLogger(__name__)
 
@@ -46,20 +47,30 @@ async def hybrid_search_cpt(
         Combined ranked results with confidence scores
     """
     # Run both searches in parallel for speed
-    vector_results, keyword_results = await asyncio.gather(
-        search_cpt_codes_vector(query_embedding, limit=20, category=category),
-        search_cpt_codes_keyword(query, limit=20, category=category),
-        return_exceptions=True  # Don't fail if one search errors
-    )
+    with timed_stage("vector_search", code_type="cpt") as vt, \
+         timed_stage("keyword_search", code_type="cpt") as kt:
+        vector_results, keyword_results = await asyncio.gather(
+            search_cpt_codes_vector(query_embedding, limit=20, category=category),
+            search_cpt_codes_keyword(query, limit=20, category=category),
+            return_exceptions=True  # Don't fail if one search errors
+        )
 
     # Handle errors gracefully
     if isinstance(vector_results, Exception):
         logger.error(f"Vector search failed: {vector_results}")
+        vt["error"] = str(vector_results)
         vector_results = []
+    else:
+        vt["count"] = len(vector_results)
+        vt["top"] = [r['cpt_code'] for r in vector_results[:5]]
 
     if isinstance(keyword_results, Exception):
         logger.error(f"Keyword search failed: {keyword_results}")
+        kt["error"] = str(keyword_results)
         keyword_results = []
+    else:
+        kt["count"] = len(keyword_results)
+        kt["top"] = [r['cpt_code'] for r in keyword_results[:5]]
 
     # Combine using RRF
     combined = reciprocal_rank_fusion(
@@ -69,6 +80,13 @@ async def hybrid_search_cpt(
 
     # Normalize scores to 0-1 range
     combined = normalize_scores(combined, score_field='rrf_score')
+
+    log_stage(
+        "rrf_fusion",
+        code_type="cpt",
+        combined_count=len(combined),
+        top=[r['cpt_code'] for r in combined[:limit]],
+    )
 
     # Return top results
     return combined[:limit]

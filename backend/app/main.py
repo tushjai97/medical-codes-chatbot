@@ -19,9 +19,11 @@ from .services.hybrid_search import search_all
 from .services.reranker_service import get_reranker_service
 from .services.embeddings import get_embedding_service
 from .utils.logger import setup_logging
+from .utils.pipeline_logger import setup_pipeline_logging, new_request_id, log_stage
 
 # Setup logging
 setup_logging(settings.LOG_LEVEL)
+setup_pipeline_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -214,6 +216,13 @@ async def get_code_suggestions(query: CodingQuery):
     ```
     """
     start_time = time.time()
+    request_id = new_request_id()
+    log_stage(
+        "request_start",
+        query=query.clinical_description,
+        mode=query.search_mode,
+        max_results=query.max_results,
+    )
 
     try:
         # Perform hybrid search
@@ -305,6 +314,12 @@ async def get_code_suggestions(query: CodingQuery):
             f"Query completed in {processing_time:.1f}ms: "
             f"{len(cpt_codes)} CPT, {len(icd10_codes)} ICD-10"
         )
+        log_stage(
+            "request_end",
+            duration_ms=round(processing_time, 1),
+            top_cpt=[c.code for c in cpt_codes[:5]],
+            top_icd10=[c.code for c in icd10_codes[:5]],
+        )
 
         return CodingResponse(
             query=query.clinical_description,
@@ -317,6 +332,7 @@ async def get_code_suggestions(query: CodingQuery):
 
     except Exception as e:
         logger.error(f"Error processing query: {e}", exc_info=True)
+        log_stage("request_error", error=str(e))
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
